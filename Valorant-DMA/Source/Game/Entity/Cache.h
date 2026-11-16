@@ -18,6 +18,7 @@ struct PlayerData {
 	FTransform FTHead;
 	FTransform FTRoot;
 	BYTE Dormant;
+	BYTE WasAlly;
 	float LastSubmit;
 	float LastRender;
 };

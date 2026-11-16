@@ -2,135 +2,148 @@
 #include "Core.h"
 #include "Entity/Cache.h"
 
-#define HIDWORD(x) ((unsigned int)(((x) >> 32) & 0xFFFFFFFF))
-#define __ROL8__(x, r) (((x) << (r)) | ((x) >> (64 - (r))))
-#define __ROR8__(x, r) (((x) >> (r)) | ((x) << (64 - (r))))
-
-__forceinline __int64 Decrypt_UWorld(const uint32_t key, const uintptr_t* state)
+auto Core::ScanForGWorld() -> bool
 {
+    const auto base = GameCache::BaseAddress;
+    const auto size = mem.GetBaseSize("Valorant-Win64-Shipping.exe");
+    if (!base || !size) { LOG("[gw] no base/size\n"); return false; }
 
-    unsigned __int64 v19; // r11
-    unsigned __int64 v20; // r8
-    unsigned __int64 v21; // r9
-    unsigned int v22; // er10
-    unsigned __int64 v23; // rcx
-    unsigned __int64 v24; // rdx
-    unsigned __int64 v25; // rcx
-    int v26; // ebx
-    unsigned int v27; // ecx
-    __int64 v28; // rax
-    unsigned __int64 v29; // r8
-    unsigned __int64 v30; // r8
-    unsigned __int64 v31; // rcx
-    unsigned __int64 v32; // rdx
-    unsigned __int64 v33; // rcx
+    auto isHeap = [&](uint64_t p) {
+        return p >= 0x10000 && p <= 0x7FFFFFFFFFFF && (p < base || p >= base + size) && !(p & 0x7);
+        };
 
-    v19 = 2685821657736338717i64
-        * ((unsigned int)key ^ (unsigned int)(key << 25) ^ (((unsigned int)key ^ ((unsigned __int64)(unsigned int)key >> 15)) >> 12))
-        % 7;
-    v20 = state[v19];
-    v21 = (2685821657736338717i64
-        * ((unsigned int)key ^ (unsigned int)(key << 25) ^ (((unsigned int)key ^ ((unsigned __int64)(unsigned int)key >> 15)) >> 12))) >> 32;
-    v22 = (unsigned int)v19 % 7;
-    if (!((unsigned int)v19 % 7))
-    {
-        v23 = (2 * (v20 - (unsigned int)(v21 - 1))) ^ ((2 * (v20 - (unsigned int)(v21 - 1))) ^ ((v20
-            - (unsigned int)(v21 - 1)) >> 1)) & 0x5555555555555555i64;
-        v24 = (4 * v23) ^ ((4 * v23) ^ (v23 >> 2)) & 0x3333333333333333i64;
-        v25 = (16 * v24) ^ ((16 * v24) ^ (v24 >> 4)) & 0xF0F0F0F0F0F0F0Fi64;
-        v20 = __ROL8__((v25 << 8) ^ ((v25 << 8) ^ (v25 >> 8)) & 0xFF00FF00FF00FFi64, 32);
-    LABEL_26:
-        v26 = 2 * v19;
-        goto LABEL_27;
+    IMAGE_DOS_HEADER dos{};
+    if (!mem.Read(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE) { LOG("[gw] bad dos\n"); return false; }
+    IMAGE_NT_HEADERS64 nt{};
+    if (!mem.Read(base + dos.e_lfanew, &nt, sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE) { LOG("[gw] bad nt\n"); return false; }
+    const auto secTable = base + dos.e_lfanew + 4 + sizeof(IMAGE_FILE_HEADER) + nt.FileHeader.SizeOfOptionalHeader;
+
+    const size_t CHUNK = 4 * 1024 * 1024;
+    std::vector<uint8_t> buf(CHUNK + 8);
+    int hits = 0;
+
+    for (unsigned s = 0; s < nt.FileHeader.NumberOfSections; s++) {
+        IMAGE_SECTION_HEADER sh{};
+        if (!mem.Read(secTable + s * sizeof(IMAGE_SECTION_HEADER), &sh, sizeof(sh))) continue;
+        const DWORD vSize = sh.Misc.VirtualSize;
+        const bool exec = (sh.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+        if (exec || !vSize) continue;
+
+        char name[9] = { 0 };
+        memcpy(name, sh.Name, 8);
+        LOG("[gw] section %s va=0x%lX size=0x%lX\n", name,
+            (unsigned long)sh.VirtualAddress, (unsigned long)vSize);
+
+        for (size_t off = 0; off < vSize; off += CHUNK) {
+            size_t toRead = std::min<size_t>(CHUNK + 8, (size_t)vSize - off);
+            if (!mem.Read(base + sh.VirtualAddress + off, buf.data(), toRead)) continue;
+
+            for (size_t i = 0; i + 8 <= toRead; i += 8) {
+                auto candidate = *reinterpret_cast<uint64_t*>(buf.data() + i);
+                if (!isHeap(candidate)) continue;
+
+                auto plevel = mem.Read<uintptr_t>(candidate + offsets::PersistentLevel);
+                if (!isHeap(plevel)) continue;
+
+                auto actorCount = mem.Read<int>(plevel + offsets::ActorArray + 0x8);
+                if (actorCount <= 0 || actorCount > 200) continue;
+
+                auto gstate = mem.Read<uintptr_t>(candidate + offsets::GameState);
+                bool gstateOk = isHeap(gstate);
+
+                LOG("[gw] HIT rva=0x%llX candidate=0x%p plevel=0x%p actorCount=%d gstateOk=%d\n",
+                    (unsigned long long)(sh.VirtualAddress + off + i),
+                    (void*)candidate, (void*)plevel, actorCount, gstateOk);
+
+                if (gstateOk) {
+                    offsets::GWorld = sh.VirtualAddress + off + i;
+                    LOG("[gw] ADOPTED GWorld rva=0x%llX\n", (unsigned long long)offsets::GWorld);
+                    return true;
+                }
+                if (++hits > 60) return false;
+            }
+        }
     }
-    if (v22 != 1)
-        goto LABEL_26;
-    v26 = 2 * v19;
-    v20 = __ROL8__(v20 - (unsigned int)(2 * v19 + v21), (unsigned __int8)(((int)v21 + (int)v19) % 0x3Fu) + 1);
-LABEL_27:
-    v27 = v26 + v21;
-    if (v22 == 2)
-        v20 = ~(v20 - v27);
-    switch (v22)
-    {
-    case 3u:
-        v28 = 2 * ((2 * v20) ^ ((2 * v20) ^ (v20 >> 1)) & 0x5555555555555555i64);
-        v20 = v28 ^ (v28 ^ (((2 * v20) ^ ((2 * v20) ^ (v20 >> 1)) & 0x5555555555555555i64) >> 1)) & 0x5555555555555555i64;
-        break;
-    case 4u:
-        v29 = __ROR8__(v20, (unsigned __int8)(v27 % 0x3F) + 1);
-        v20 = (2 * v29) ^ ((2 * v29) ^ (v29 >> 1)) & 0x5555555555555555i64;
-        break;
-    case 5u:
-        v30 = __ROR8__(v20, (unsigned __int8)(v27 % 0x3F) + 1);
-        v31 = (2 * v30) ^ ((2 * v30) ^ (v30 >> 1)) & 0x5555555555555555i64;
-        v32 = (4 * v31) ^ ((4 * v31) ^ (v31 >> 2)) & 0x3333333333333333i64;
-        v33 = (16 * v32) ^ ((16 * v32) ^ (v32 >> 4)) & 0xF0F0F0F0F0F0F0Fi64;
-        v20 = __ROL8__((v33 << 8) ^ ((v33 << 8) ^ (v33 >> 8)) & 0xFF00FF00FF00FFi64, 32);
-        break;
-    case 6u:
-        v20 = ~v20 - (unsigned int)(v21 + v19);
-        break;
-    }
-    return v20 ^ (unsigned int)key;
-}
 
-uintptr_t Stateaddy = 0xAF30580,
-KeyAddy = Stateaddy + 0x38;
-
-inline auto decryptWorld(uintptr_t base_address) -> uintptr_t {
-
-    auto key = mem.Read<uintptr_t>(base_address + Stateaddy + KeyAddy);
-#pragma pack(push, 1)
-    struct State {
-        uint64_t Keys[7];
-    };
-#pragma pack(pop)
-    auto state = mem.Read<State>(base_address + Stateaddy);
-
-    auto decrypt = Decrypt_UWorld(key, (uintptr_t*)&state);
-    auto decrypt_read = mem.Read<uintptr_t>(decrypt);
-
-    return decrypt_read;
+    LOG("[gw] no hit (hits=%d)\n", hits);
+    return false;
 }
 
 auto Core::InitGame(bool debug) -> void
 {
-	while (true) 
-	{
-        if (debug) LOG("BaseAddress: 0x%p\n", GameCache::BaseAddress);
+    ULONGLONG lastBaseCheck = 0;
+    ULONGLONG lastLog = 0;
+    bool scanned = false;
 
-        GameCache::UWorld = mem.Read<uintptr_t>(mem.Read<uintptr_t>(GameCache::BaseAddress + 0x9ef4050));
-		if (debug) LOG("UWorld: 0x%p\n", GameCache::UWorld);
+    while (true)
+    {
+        const auto now = GetTickCount64();
 
-		GameCache::GameState = mem.Read<uintptr_t>(GameCache::UWorld + offsets::GameState);
-		if (debug) LOG("GameState: 0x%p\n", GameCache::GameState);
+        // re-resolve base once a second: ASLR / game restart invalidates it
+        if (now - lastBaseCheck > 1000) {
+            lastBaseCheck = now;
+            auto base = mem.GetBaseDaddy("Valorant-Win64-Shipping.exe");
+            if (base && base != GameCache::BaseAddress) {
+                GameCache::BaseAddress = base;
+                LOG("BaseAddress refreshed: 0x%p\n", (void*)GameCache::BaseAddress);
+            }
+        }
+        if (!GameCache::BaseAddress) { Sleep(250); continue; }
 
-		GameCache::GameInstance = mem.Read<uintptr_t>(GameCache::UWorld + offsets::GameInstance);
-		if (debug) LOG("GameInstance: 0x%p\n", GameCache::GameInstance);
+        // run the GWorld scan exactly once, after we have a base address
+        if (!scanned) { ScanForGWorld(); scanned = true; }
 
-		GameCache::PersistentLevel = mem.Read<uintptr_t>(GameCache::UWorld + offsets::PersistentLevel);
-		if (debug) LOG("PersistentLevel: 0x%p\n", GameCache::PersistentLevel);
+        // throttle debug spam to ~4/sec
+        const bool logNow = debug && (now - lastLog >= 250);
+        if (logNow) lastLog = now;
 
-		auto templocal = mem.Read<uintptr_t>(GameCache::GameInstance + offsets::LocalPlayers);
-		GameCache::LocalPlayers = mem.Read<uintptr_t>(templocal);
-		if (debug) LOG("LocalPlayers: 0x%p\n", GameCache::LocalPlayers);
+        // GWorld can alternate between the real world and a stale/decoy instance.
+        // Validate by checking PersistentLevel + a sane actor count.
+        auto candidate = mem.Read<uintptr_t>(GameCache::BaseAddress + offsets::GWorld);
+        if (candidate < 0x10000 || candidate > 0x7FFFFFFFFFFF) {
+            if (logNow) LOG("GWorld read invalid: 0x%p\n", (void*)candidate);
+            Sleep(8);
+            continue;
+        }
 
-		GameCache::PlayerController = mem.Read<uintptr_t>(GameCache::LocalPlayers + offsets::PlayerController);
-		if (debug) LOG("PlayerController: 0x%p\n", GameCache::PlayerController);
+        auto plevel = mem.Read<uintptr_t>(candidate + offsets::PersistentLevel);
+        auto actorCount = plevel ? mem.Read<int>(plevel + offsets::ActorArray + 0x8) : 0;
+        bool validWorld = plevel >= 0x10000 && actorCount > 0 && actorCount < 10000;
 
-		if (GameCache::PlayerController) 
-		{
-			GameCache::LocalPawn = mem.Read<uintptr_t>(GameCache::PlayerController + offsets::LocalPawn);
-			if (debug) LOG("LocalPawn: 0x%p\n", GameCache::LocalPawn);
+        if (logNow) LOG("GWorld=0x%p PersistentLevel=0x%p actorCount=%d valid=%d\n",
+            (void*)candidate, (void*)plevel, actorCount, validWorld);
 
-			GameCache::PlayerCameraManager = mem.Read<uintptr_t>(GameCache::PlayerController + offsets::CameraManager);
-			if (debug) LOG("PlayerCameraManager: 0x%p\n", GameCache::PlayerCameraManager);
-		}
+        if (!validWorld) { Sleep(8); continue; }
 
-		GameCache::PlayerCount = mem.Read<uintptr_t>(GameCache::PersistentLevel + 0xA8);
-		if (debug) LOG("PlayerCount: 0x%p\n", GameCache::PlayerCount);
+        GameCache::UWorld = candidate;
+        GameCache::PersistentLevel = plevel;
+        if (logNow) LOG("UWorld: 0x%p\n", (void*)GameCache::UWorld);
 
-		Sleep(2000);
-	}
+        GameCache::GameState = mem.Read<uintptr_t>(GameCache::UWorld + offsets::GameState);
+        if (logNow) LOG("GameState: 0x%p\n", (void*)GameCache::GameState);
+
+        GameCache::GameInstance = mem.Read<uintptr_t>(GameCache::UWorld + offsets::GameInstance);
+        if (logNow) LOG("GameInstance: 0x%p\n", (void*)GameCache::GameInstance);
+
+        auto templocal = mem.Read<uintptr_t>(GameCache::GameInstance + offsets::LocalPlayers);
+        GameCache::LocalPlayers = mem.Read<uintptr_t>(templocal);
+        if (logNow) LOG("LocalPlayers: 0x%p\n", (void*)GameCache::LocalPlayers);
+
+        GameCache::PlayerController = mem.Read<uintptr_t>(GameCache::LocalPlayers + offsets::PlayerController);
+        if (logNow) LOG("PlayerController: 0x%p\n", (void*)GameCache::PlayerController);
+
+        if (GameCache::PlayerController)
+        {
+            GameCache::LocalPawn = mem.Read<uintptr_t>(GameCache::PlayerController + offsets::AcknowledgedPawn);
+            if (logNow) LOG("LocalPawn: 0x%p\n", (void*)GameCache::LocalPawn);
+
+            GameCache::PlayerCameraManager = mem.Read<uintptr_t>(GameCache::PlayerController + offsets::CameraManager);
+            if (logNow) LOG("PlayerCameraManager: 0x%p\n", (void*)GameCache::PlayerCameraManager);
+        }
+
+        GameCache::PlayerCount = mem.Read<uintptr_t>(GameCache::PersistentLevel + offsets::ActorArray + 0x8);
+        if (logNow) LOG("PlayerCount: %d\n", GameCache::PlayerCount);
+
+        Sleep(8);
+    }
 }

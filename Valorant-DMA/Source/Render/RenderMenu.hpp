@@ -20,9 +20,18 @@ ID3D11RenderTargetView* p_render_target_view = nullptr;
 MSG messager = { nullptr };
 HWND my_wnd = nullptr;
 
-// Constants
-const int WINDOW_WIDTH = settings::width;
-const int WINDOW_HEIGHT = settings::height;
+// Overlay size - mutable so it can be changed at runtime
+static int WINDOW_WIDTH = 0;
+static int WINDOW_HEIGHT = 0;
+
+void apply_resolution(int w, int h) {
+    if (w < 320 || h < 240) return;
+    WINDOW_WIDTH = w;
+    WINDOW_HEIGHT = h;
+    settings::width = w;
+    settings::height = h;
+    if (my_wnd) SetWindowPos(my_wnd, HWND_TOPMOST, 0, 0, w, h, SWP_SHOWWINDOW);
+}
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -67,6 +76,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 HRESULT directx_init()
 {
+    // honour a saved resolution, otherwise fall back to the desktop
+    if (settings::width <= 0 || settings::height <= 0) {
+        settings::width = GetSystemMetrics(SM_CXSCREEN);
+        settings::height = GetSystemMetrics(SM_CYSCREEN);
+    }
+    WINDOW_WIDTH = settings::width;
+    WINDOW_HEIGHT = settings::height;
+
     // Register the window class
     WNDCLASSEXA wcex = {
         sizeof(WNDCLASSEXA),
@@ -184,6 +201,21 @@ void case2()
     if (ImGui::Button("Save Config", { 120, 20 })) settings::saveSettings("config.txt");
     ImGui::Checkbox("Transparent", &settings::misc::bTransparent);
 
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::Text("Overlay resolution");
+    ImGui::SetNextItemWidth(110);
+    ImGui::InputInt("W", &settings::width);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110);
+    ImGui::InputInt("H", &settings::height);
+    ImGui::SameLine();
+    if (ImGui::Button("Apply", { 70, 0 })) apply_resolution(settings::width, settings::height);
+    if (ImGui::Button("Use current screen", { 160, 0 })) {
+        settings::width = GetSystemMetrics(SM_CXSCREEN);
+        settings::height = GetSystemMetrics(SM_CYSCREEN);
+        apply_resolution(settings::width, settings::height);
+    }
+
     ImGui::SetCursorPosY(ImGui::GetWindowHeight() - ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().ItemSpacing.y);
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 130);
     if (ImGui::Button("Close", { 120, 20 })) exit(0);
@@ -269,7 +301,7 @@ void render_menu()
             1.0f
         );
     }
-    
+
 
     if (show_menu)
     {
@@ -299,5 +331,3 @@ void render_menu()
     }
     ImGui::EndFrame();
 }
-
-

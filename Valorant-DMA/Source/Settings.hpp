@@ -5,8 +5,8 @@
 using json = nlohmann::json;
 namespace settings
 {
-	inline int width = 1920;
-	inline int height = 1080;
+    inline int width = 0;
+    inline int height = 0;
 
 	namespace aimbot
 	{

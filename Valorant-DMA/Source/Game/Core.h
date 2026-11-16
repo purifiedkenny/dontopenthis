@@ -4,7 +4,8 @@
 class Core
 {
 public:
-	void InitGame(bool debug = true);
+    void InitGame(bool debug = true);
+    bool ScanForGWorld();
 };
 
 inline Core InitCore;
