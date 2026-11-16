@@ -36,14 +36,27 @@ XMMATRIX to_matrix(const Vector3& rot, const Vector3& origin = Vector3(0, 0, 0))
 	return matrix;
 }
 
+inline Vector3 camera_location(const Camera& camera)
+{
+	return Vector3((float)camera.Location[0], (float)camera.Location[1], (float)camera.Location[2]);
+}
+
+inline Vector3 camera_rotation(const Camera& camera)
+{
+	return Vector3((float)camera.Rotation[0], (float)camera.Rotation[1], (float)camera.Rotation[2]);
+}
+
 Vector2 w2s(const Camera& camera, Vector3 world_location) {
-	XMMATRIX temp_matrix = to_matrix(camera.Rotation);
+	const Vector3 cam_loc = camera_location(camera);
+	const Vector3 cam_rot = camera_rotation(camera);
+
+	XMMATRIX temp_matrix = to_matrix(cam_rot);
 
 	XMVECTOR vaxisx = temp_matrix.r[0];
 	XMVECTOR vaxisy = temp_matrix.r[1];
 	XMVECTOR vaxisz = temp_matrix.r[2];
 
-	Vector3 vdelta = world_location - camera.Location;
+	Vector3 vdelta = world_location - cam_loc;
 	XMVECTOR vdelta_vec = XMVectorSet(vdelta.x, vdelta.y, vdelta.z, 0.0f);
 
 	float vtransformed_x = XMVectorGetX(XMVector3Dot(vaxisy, vdelta_vec));
@@ -63,7 +76,6 @@ Vector2 w2s(const Camera& camera, Vector3 world_location) {
 
 	return { screen_x, screen_y };
 }
-
 
 Vector3 doMatrix(FTransform bone, FTransform component_to_world)
 {

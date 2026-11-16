@@ -30,13 +30,12 @@ namespace settings
 		inline static char uuid[128] = "";
 	}
 
-	namespace visuals
-	{
-		inline bool bBox;
-		inline bool bLines;
-		inline bool bHealth;
-
-	}
+    namespace visuals
+    {
+        inline bool bBox = true;
+        inline bool bLines = false;
+        inline bool bHealth = true;
+    }
 
 	namespace misc
 	{

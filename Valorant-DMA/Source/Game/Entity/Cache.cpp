@@ -5,87 +5,148 @@
 #include "../Render/RenderMenu.hpp"
 #include "../sdk.hpp"
 
+// player-state based chain, per the reference implementation
+static constexpr uintptr_t kGameStatePlayerArray = 0x480;
+static constexpr uintptr_t kSpawnedCharacter = 0xBC8;
+static constexpr float kHeadOffset = 90.0f;
+static constexpr float kFootOffset = -100.0f;
+
+static bool sane_pos(double x, double y, double z)
+{
+    return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+        fabs(x) < 200000.0 && fabs(y) < 200000.0 && fabs(z) < 200000.0 &&
+        (x != 0.0 || y != 0.0 || z != 0.0);
+}
+
 void Cache::EntityLoop()
 {
+    if (!GameCache::PersistentLevel || !GameCache::PlayerCameraManager || !GameCache::GameState) return;
+
     auto scatter_handle = mem.CreateScatterHandle();
 
-    mem.AddScatterReadRequest(scatter_handle, GameCache::PlayerCameraManager + offsets::CameraCache, &GameCache::LocalCamera, sizeof(Camera));
-    mem.AddScatterReadRequest(scatter_handle, GameCache::PersistentLevel + offsets::ActorArray, &GameCache::PlayerArray, sizeof(uintptr_t));
-    mem.AddScatterReadRequest(scatter_handle, GameCache::PersistentLevel + offsets::ActorArray + 0x8, &GameCache::PlayerCount, sizeof(int));
+    mem.AddScatterReadRequest(scatter_handle, GameCache::PlayerCameraManager + offsets::ViewInfo, &GameCache::LocalCamera, sizeof(Camera));
     mem.ExecuteReadScatter(scatter_handle);
 
-    if (GameCache::PlayerCount <= 0 || GameCache::PlayerCount > 10000) { mem.CloseScatterHandle(scatter_handle); return; }
-    if (!GameCache::PlayerArray) { mem.CloseScatterHandle(scatter_handle); return; }
+    if (GameCache::LocalCamera.FieldOfView <= 1.0f || GameCache::LocalCamera.FieldOfView > 170.0f) { mem.CloseScatterHandle(scatter_handle); return; }
 
-    std::vector<uintptr_t> actor_array(GameCache::PlayerCount);
-    mem.Read(GameCache::PlayerArray, actor_array.data(), GameCache::PlayerCount * sizeof(uintptr_t));
+    uintptr_t player_array = mem.Read<uintptr_t>(GameCache::GameState + kGameStatePlayerArray);
+    int count = mem.Read<int>(GameCache::GameState + kGameStatePlayerArray + 0x8);
+    if (!player_array || count <= 0 || count > 64) { mem.CloseScatterHandle(scatter_handle); return; }
 
-    std::vector<PlayerData> players_data(GameCache::PlayerCount);
+    const double cam[3] = { GameCache::LocalCamera.Location[0], GameCache::LocalCamera.Location[1], GameCache::LocalCamera.Location[2] };
+    const double rot[3] = { GameCache::LocalCamera.Rotation[0], GameCache::LocalCamera.Rotation[1], GameCache::LocalCamera.Rotation[2] };
 
-    for (int i = 0; i < GameCache::PlayerCount; i++) {
-        uintptr_t actor = actor_array[i];
-        if (CheckValidVA(actor)) {
-            mem.AddScatterReadRequest(scatter_handle, actor + offsets::PawnPrivate, &players_data[i].pawnpriv, sizeof(uintptr_t));
-            mem.AddScatterReadRequest(scatter_handle, actor + offsets::Mesh, &players_data[i].Mesh, sizeof(uintptr_t));
-            mem.AddScatterReadRequest(scatter_handle, actor + offsets::damageHandler, &players_data[i].DamageHandler, sizeof(uintptr_t));
-            mem.AddScatterReadRequest(scatter_handle, actor + offsets::Dormant, &players_data[i].Dormant, sizeof(BYTE));
-            mem.AddScatterReadRequest(scatter_handle, actor + offsets::damageHandler + offsets::WasAlly, &players_data[i].WasAlly, sizeof(BYTE));
-        }
+    // camera forward vector - used to reject targets behind us
+    const double pr = rot[0] * 3.14159265358979 / 180.0;
+    const double yr = rot[1] * 3.14159265358979 / 180.0;
+    const double fwd[3] = { std::cos(pr) * std::cos(yr), std::cos(pr) * std::sin(yr), std::sin(pr) };
+
+    // ---- pass 1: player states ----
+    std::vector<uintptr_t> states(count, 0);
+    for (int i = 0; i < count; i++)
+        mem.AddScatterReadRequest(scatter_handle, player_array + i * sizeof(uintptr_t), &states[i], sizeof(uintptr_t));
+    mem.ExecuteReadScatter(scatter_handle);
+
+    // ---- pass 2: pawn from each player state ----
+    std::vector<uintptr_t> spawned(count, 0), pawnpriv(count, 0), pawns(count, 0);
+    for (int i = 0; i < count; i++) {
+        if (!CheckValidVA(states[i])) continue;
+        mem.AddScatterReadRequest(scatter_handle, states[i] + kSpawnedCharacter, &spawned[i], sizeof(uintptr_t));
+        mem.AddScatterReadRequest(scatter_handle, states[i] + offsets::PawnPrivate, &pawnpriv[i], sizeof(uintptr_t));
     }
     mem.ExecuteReadScatter(scatter_handle);
 
-    for (int i = 0; i < GameCache::PlayerCount; i++) {
-        if (CheckValidVA(players_data[i].Mesh) && players_data[i].pawnpriv != GameCache::LocalPawn && (!players_data[i].Dormant || players_data[i].Dormant == 1)) {
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].Mesh + offsets::BoneArray, &players_data[i].BoneArray, sizeof(uintptr_t));
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].Mesh + offsets::BoneArray + 0x10, &players_data[i].BoneArrayCache, sizeof(uintptr_t));
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].Mesh + offsets::ComponetToWorld, &players_data[i].Comp2World, sizeof(FTransform));
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].DamageHandler + offsets::Health, &players_data[i].Health, sizeof(float));
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].Mesh + offsets::LastSubmitTime, &players_data[i].LastSubmit, sizeof(float));
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].Mesh + offsets::LastRenderTimeOnScreen, &players_data[i].LastRender, sizeof(float));
-        }
+    for (int i = 0; i < count; i++)
+        pawns[i] = spawned[i] ? spawned[i] : pawnpriv[i];
+
+    // ---- pass 3: damage handler, root component, ally flag ----
+    std::vector<uintptr_t> dh(count, 0), root(count, 0);
+    std::vector<BYTE> ally(count, 0);
+
+    for (int i = 0; i < count; i++) {
+        if (!CheckValidVA(pawns[i]) || pawns[i] == GameCache::LocalPawn) continue;
+        mem.AddScatterReadRequest(scatter_handle, pawns[i] + offsets::damageHandler, &dh[i], sizeof(uintptr_t));
+        mem.AddScatterReadRequest(scatter_handle, pawns[i] + offsets::RootComponent, &root[i], sizeof(uintptr_t));
+        mem.AddScatterReadRequest(scatter_handle, pawns[i] + offsets::WasAlly, &ally[i], sizeof(BYTE));
     }
     mem.ExecuteReadScatter(scatter_handle);
 
-    for (int i = 0; i < GameCache::PlayerCount; i++) {
-        if (!players_data[i].BoneArray) {
-            players_data[i].BoneArray = players_data[i].BoneArrayCache;
-        }
-        if (players_data[i].BoneArray) {
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].BoneArray + (8 * 0x30), &players_data[i].FTHead, sizeof(FTransform));
-            mem.AddScatterReadRequest(scatter_handle, players_data[i].BoneArray + (0 * 0x30), &players_data[i].FTRoot, sizeof(FTransform));
-        }
+    // ---- pass 4: health + relative location (3 doubles) ----
+    std::vector<float> hp(count, 0.0f);
+    std::vector<double> pos(count * 3, 0.0);
+
+    for (int i = 0; i < count; i++) {
+        if (CheckValidVA(dh[i]))
+            mem.AddScatterReadRequest(scatter_handle, dh[i] + offsets::Health, &hp[i], sizeof(float));
+        if (CheckValidVA(root[i]))
+            mem.AddScatterReadRequest(scatter_handle, root[i] + offsets::RootPosition, &pos[i * 3], sizeof(double) * 3);
     }
     mem.ExecuteReadScatter(scatter_handle);
 
-    Vector2 Closest2DHead;
+    mem.CloseScatterHandle(scatter_handle);
+
+    int c_scan = count, c_skip = 0, c_ally = 0, c_nohp = 0, c_behind = 0, c_off = 0, c_proj = 0, c_drawn = 0;
+    std::string dbg;
+
+    Vector2 Closest2DHead{};
     float min_distance = std::numeric_limits<float>::max();
+    bool have_target = false;
 
-    for (int i = 0; i < GameCache::PlayerCount; i++) {
-        const auto& data = players_data[i];
-        if (!data.pawnpriv || data.pawnpriv == GameCache::LocalPawn || !data.Mesh || !data.BoneArray || data.Health == 0) {
-            continue;
+    const ImVec2 screenCenter = ImVec2(settings::width / 2.0f, settings::height);
+    const float fov_rad = GameCache::LocalCamera.FieldOfView * 3.14159265f / 360.0f;
+    const float px_scale = (settings::width / 2.0f) / tanf(fov_rad);
+
+    for (int i = 0; i < count; i++) {
+        if (!pawns[i] || pawns[i] == GameCache::LocalPawn) { c_skip++; continue; }
+        if (ally[i]) { c_ally++; continue; }
+        if (hp[i] <= 0.0f || hp[i] > 200.0f) { c_nohp++; continue; }
+        if (!CheckValidVA(root[i])) { c_skip++; continue; }
+
+        const double px = pos[i * 3 + 0];
+        const double py = pos[i * 3 + 1];
+        const double pz = pos[i * 3 + 2];
+        if (!sane_pos(px, py, pz)) { c_skip++; continue; }
+
+        const double dxw = px - cam[0];
+        const double dyw = py - cam[1];
+        const double dzw = pz - cam[2];
+
+        const double depth = dxw * fwd[0] + dyw * fwd[1] + dzw * fwd[2];
+        if (depth < 10.0) { c_behind++; continue; }
+
+        const Vector3 Head3D((float)px, (float)py, (float)(pz + kHeadOffset));
+        const Vector3 Foot3D((float)px, (float)py, (float)(pz + kFootOffset));
+
+        const Vector2 Head2D = w2s(GameCache::LocalCamera, Head3D);
+        const Vector2 Foot2D = w2s(GameCache::LocalCamera, Foot3D);
+
+        if (!std::isfinite(Head2D.x) || !std::isfinite(Head2D.y) || !std::isfinite(Foot2D.x) || !std::isfinite(Foot2D.y)) { c_off++; continue; }
+        if (Head2D.x < -200.0f || Head2D.x > settings::width + 200.0f ||
+            Head2D.y < -200.0f || Head2D.y > settings::height + 200.0f) {
+            c_off++; continue;
         }
-        if (data.WasAlly) continue;
 
-        bool isvis = data.LastRender + 0.06f >= data.LastSubmit;
-        ImColor boxcolor = isvis ? ImColor(0, 255, 0, 255) : ImColor(255, 0, 0, 255);
+        float height = Foot2D.y - Head2D.y;
+        if (height < 4.0f || height > settings::height) { c_off++; continue; }
 
-        Vector3 Head3D = doMatrix(data.FTHead, data.Comp2World);
-        Vector3 Bottom3D = doMatrix(data.FTRoot, data.Comp2World);
+        const double dist = std::sqrt(dxw * dxw + dyw * dyw + dzw * dzw);
+        const float expected = (float)(190.0 * px_scale / dist);
+        if (height < expected * 0.45f || height > expected * 1.8f) { c_off++; continue; }
 
-        double distance = GameCache::LocalCamera.Location.Distance(Head3D) / 100.f;
+        float width = height * 0.4f;
+        c_proj++;
 
-        Vector2 Head2D = w2s(GameCache::LocalCamera, Head3D);
-        Vector2 Bottom2D = w2s(GameCache::LocalCamera, Bottom3D);
+        if (c_proj <= 3) {
+            dbg += std::format(" [ok d{:.0f} p=({:.0f},{:.0f},{:.0f}) s=({:.0f},{:.0f}) h={:.0f} e={:.0f}]",
+                dist, px, py, pz, Head2D.x, Head2D.y, height, expected);
+        }
 
-        ImVec2 screenCenter = ImVec2(settings::width / 2, settings::height);
+        ImColor boxcolor = ImColor(0, 255, 0, 255);
+        const Vector2 Bottom2D = Vector2(Head2D.x, Foot2D.y);
 
-        float height = Bottom2D.y - Head2D.y;
-        float width = height * 0.5f;
-
-        if (settings::visuals::bBox) DrawBox(Head2D.x - (width / 2), Head2D.y, width, height, boxcolor, 1);
-        if (settings::visuals::bLines) DrawLine(Bottom2D, screenCenter, boxcolor);
-        if (settings::visuals::bHealth) DrawHealth(Head2D, Bottom2D, data.Health, width, height);
+        if (settings::visuals::bBox) { DrawBox(Head2D.x - (width / 2), Head2D.y, width, height, boxcolor, 1); c_drawn++; }
+        if (settings::visuals::bLines)  DrawLine(Bottom2D, screenCenter, boxcolor);
+        if (settings::visuals::bHealth) DrawHealth(Head2D, Bottom2D, hp[i], width, height);
 
         float dx = Head2D.x - (settings::width / 2.0f);
         float dy = Head2D.y - (settings::height / 2.0f);
@@ -94,17 +155,29 @@ void Cache::EntityLoop()
         if (screen_dist <= settings::aimbot::fov && screen_dist < min_distance) {
             min_distance = screen_dist;
             Closest2DHead = Head2D;
+            have_target = true;
         }
-
-        if (mem.GetKeyboard()->IsKeyDown(settings::aimbot::aimkey1) || mem.GetKeyboard()->IsKeyDown(settings::aimbot::aimkey2)) {
-            std::lock_guard<std::mutex> lock(target_mutex);
-            target_position2d = Closest2DHead;
-            aim.StartAimbotThread();
-        }
-        else
-            aim.StopAimbotThread();
     }
-    mem.CloseScatterHandle(scatter_handle);
+
+    if (have_target) {
+        std::lock_guard<std::mutex> lock(target_mutex);
+        target_position2d = Closest2DHead;
+    }
+
+    static ULONGLONG last_diag = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last_diag >= 1000) {
+        last_diag = now;
+        LOG("[esp] n=%d skip=%d ally=%d nohp=%d behind=%d off=%d proj=%d drawn=%d%s\n",
+            c_scan, c_skip, c_ally, c_nohp, c_behind, c_off, c_proj, c_drawn, dbg.c_str());
+    }
+
+    if (mem.GetKeyboard() &&
+        (mem.GetKeyboard()->IsKeyDown(settings::aimbot::aimkey1) ||
+            mem.GetKeyboard()->IsKeyDown(settings::aimbot::aimkey2)))
+        aim.StartAimbotThread();
+    else
+        aim.StopAimbotThread();
 }
 
 WPARAM render_loop() {

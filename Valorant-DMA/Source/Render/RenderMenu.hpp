@@ -329,5 +329,5 @@ void render_menu()
         }
         ImGui::End();
     }
-    ImGui::EndFrame();
+
 }

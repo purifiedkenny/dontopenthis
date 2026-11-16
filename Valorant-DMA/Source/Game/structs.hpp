@@ -93,27 +93,27 @@ typedef struct MMatrix {
     };
 };
 
-struct alignas(16) FTransform
+struct FTransform
 {
-    XMVECTOR rot;
-    XMVECTOR translation;
-    XMVECTOR scale;
+    double rot[4];         // +0x00 FQuat, doubles
+    double translation[3]; // +0x20 FVector, doubles
+    double scale[3];       // +0x38 FVector, doubles
 
-    XMMATRIX ToMatrixWithScale()
+    XMMATRIX ToMatrixWithScale() const
     {
         XMMATRIX m;
-        float x = XMVectorGetX(rot);
-        float y = XMVectorGetY(rot);
-        float z = XMVectorGetZ(rot);
-        float w = XMVectorGetW(rot);
+        float x = (float)rot[0];
+        float y = (float)rot[1];
+        float z = (float)rot[2];
+        float w = (float)rot[3];
 
-        float sx = XMVectorGetX(scale);
-        float sy = XMVectorGetY(scale);
-        float sz = XMVectorGetZ(scale);
+        float sx = (float)scale[0];
+        float sy = (float)scale[1];
+        float sz = (float)scale[2];
 
-        float tx = XMVectorGetX(translation);
-        float ty = XMVectorGetY(translation);
-        float tz = XMVectorGetZ(translation);
+        float tx = (float)translation[0];
+        float ty = (float)translation[1];
+        float tz = (float)translation[2];
 
         float x2 = x + x;
         float y2 = y + y;
@@ -138,39 +138,54 @@ struct alignas(16) FTransform
 
     bool IsValid() const
     {
+        const double lenSq = rot[0] * rot[0] + rot[1] * rot[1] + rot[2] * rot[2] + rot[3] * rot[3];
+        if (fabs(lenSq - 1.0) > 0.05) return false;
+        if (scale[0] <= 0.0 || scale[1] <= 0.0 || scale[2] <= 0.0) return false;
+        if (isnan(translation[0]) || isnan(translation[1]) || isnan(translation[2])) return false;
+        return true;
+    }
+};
+
+struct FTransformF
+{
+    XMVECTOR rot;
+    XMVECTOR translation;
+    XMVECTOR scale;
+
+    XMMATRIX ToMatrixWithScale() const
+    {
+        XMMATRIX m;
         float x = XMVectorGetX(rot);
         float y = XMVectorGetY(rot);
         float z = XMVectorGetZ(rot);
         float w = XMVectorGetW(rot);
 
-        float lengthSq = x * x + y * y + z * z + w * w;
-        if (fabsf(lengthSq - 1.0f) > 0.01f) {
-            return false;
-        }
-
         float sx = XMVectorGetX(scale);
         float sy = XMVectorGetY(scale);
         float sz = XMVectorGetZ(scale);
-        if (sx <= 0.0f || sy <= 0.0f || sz <= 0.0f) {
-            return false;
-        }
 
         float tx = XMVectorGetX(translation);
         float ty = XMVectorGetY(translation);
         float tz = XMVectorGetZ(translation);
-        if (isnan(tx) || isnan(ty) || isnan(tz)) {
-            return false;
-        }
 
-        return true;
+        float x2 = x + x, y2 = y + y, z2 = z + z;
+        float xx2 = x * x2, yy2 = y * y2, zz2 = z * z2;
+        float yz2 = y * z2, wx2 = w * x2, xy2 = x * y2;
+        float wz2 = w * z2, xz2 = x * z2, wy2 = w * y2;
+
+        m.r[0] = XMVectorSet((1.0f - (yy2 + zz2)) * sx, (xy2 + wz2) * sx, (xz2 - wy2) * sx, 0.0f);
+        m.r[1] = XMVectorSet((xy2 - wz2) * sy, (1.0f - (xx2 + zz2)) * sy, (yz2 + wx2) * sy, 0.0f);
+        m.r[2] = XMVectorSet((xz2 + wy2) * sz, (yz2 - wx2) * sz, (1.0f - (xx2 + yy2)) * sz, 0.0f);
+        m.r[3] = XMVectorSet(tx, ty, tz, 1.0f);
+        return m;
     }
 };
 
 struct Camera
 {
-    Vector3 Location;
-    Vector3 Rotation;
-    float FieldOfView;
+    double Location[3];   // +0x00 FVector, UE5 doubles
+    double Rotation[3];   // +0x18 FRotator, UE5 doubles
+    float  FieldOfView;   // +0x30
 };
 
 
@@ -178,7 +193,7 @@ namespace offsets
 {
     // core chain - GWorld is a PLAIN pointer on 13.10, no decrypt,
     // but can alternate between the real world and a stale instance
-    inline uintptr_t GWorld = 0xCEC5640;
+    inline uintptr_t GWorld = 0xD82CC70;
     inline uintptr_t GObjects = 0xCF4FC50;
     inline uintptr_t FNamePool = 0xD9C9B40;
     inline uintptr_t FNameState = 0xD8CF4D0;
